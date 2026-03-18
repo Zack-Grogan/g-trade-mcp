@@ -64,7 +64,7 @@ class McpTransportTests(unittest.TestCase):
     def test_mcp_endpoint_completes_initialize_and_notification_flow(self) -> None:
         init_response = self.client.post(
             "/mcp",
-            headers={"Authorization": "Bearer test-analytics-key"},
+            headers={"Authorization": "Bearer test-mcp-token"},
             json={
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -81,7 +81,7 @@ class McpTransportTests(unittest.TestCase):
         notification_response = self.client.post(
             "/mcp",
             headers={
-                "Authorization": "Bearer test-analytics-key",
+                "Authorization": "Bearer test-mcp-token",
                 mcp_app.MCP_SESSION_HEADER: session_id,
             },
             json={
@@ -97,7 +97,7 @@ class McpTransportTests(unittest.TestCase):
         tools_response = self.client.post(
             "/mcp",
             headers={
-                "Authorization": "Bearer test-analytics-key",
+                "Authorization": "Bearer test-mcp-token",
                 mcp_app.MCP_SESSION_HEADER: session_id,
             },
             json={
@@ -109,7 +109,43 @@ class McpTransportTests(unittest.TestCase):
         )
 
         self.assertEqual(tools_response.status_code, 200)
+        tools = tools_response.json()["result"]["tools"]
+        tool_names = {tool["name"] for tool in tools}
         self.assertIn("tools", tools_response.json()["result"])
+        self.assertIn("query_runtime_logs", tool_names)
+        self.assertIn("get_bridge_failures", tool_names)
+        self.assertIn("generate_rlm_report", tool_names)
+
+    def test_mcp_endpoint_rejects_analytics_token(self) -> None:
+        response = self.client.post(
+            "/mcp",
+            headers={"Authorization": "Bearer test-analytics-key"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2025-03-26"},
+            },
+        )
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_chat_with_rlm_tool_routes_to_rlm_service(self) -> None:
+        async def fake_rlm_post(path: str, body: dict | None = None) -> dict:
+            return {"path": path, "body": body, "message": "analysis"}
+
+        self.addCleanup(setattr, mcp_app, "_rlm_post", mcp_app._rlm_post)
+        mcp_app._rlm_post = fake_rlm_post
+
+        result = asyncio.run(
+            mcp_app._call_tool(
+                "chat_with_rlm",
+                {"prompt": "Investigate bridge auth failures", "lookback": 4},
+            )
+        )
+
+        self.assertEqual(result["path"], "/chat/analyze")
+        self.assertEqual(result["body"]["prompt"], "Investigate bridge auth failures")
 
 
 if __name__ == "__main__":
