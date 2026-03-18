@@ -123,6 +123,43 @@ def _handle_jsonrpc(body: dict) -> dict:
 app = FastAPI(title="g-trade-mcp")
 
 
+# Root path handlers - Cursor posts to root URL
+@app.post("/")
+async def root_post(request: Request, authorization: str | None = Header(None)):
+    if not _bearer_ok(authorization):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
+    body = await request.json()
+    try:
+        return _handle_jsonrpc(body)
+    except Exception as e:
+        logger.exception("MCP request failed")
+        return _jsonrpc_error(body.get("id"), -32000, str(e))
+
+
+@app.get("/")
+async def root_get(request: Request, authorization: str | None = Header(None)):
+    """SSE endpoint for streamable HTTP transport at root."""
+    if not _bearer_ok(authorization):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        yield f"event: endpoint\ndata: /\n\n"
+        import asyncio
+        while True:
+            await asyncio.sleep(30)
+            yield f"event: ping\ndata: {{}}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
 @app.post("/mcp")
 async def mcp_post(request: Request, authorization: str | None = Header(None)):
     if not _bearer_ok(authorization):
@@ -142,9 +179,7 @@ async def mcp_get(request: Request, authorization: str | None = Header(None)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        # Send endpoint event for discovery
         yield f"event: endpoint\ndata: /mcp\n\n"
-        # Keep connection alive with periodic pings
         import asyncio
         while True:
             await asyncio.sleep(30)
