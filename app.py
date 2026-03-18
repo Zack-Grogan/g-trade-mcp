@@ -1,6 +1,6 @@
 """
 g-trade-mcp: G-Trade MCP server backed by analytics API (same tool/resource names as local).
-Auth: Bearer ANALYTICS_API_KEY.
+Auth: Bearer ANALYTICS_API_KEY or MCP_AUTH_TOKEN.
 """
 from __future__ import annotations
 
@@ -16,13 +16,20 @@ logger = logging.getLogger(__name__)
 
 ANALYTICS_API_URL = (os.environ.get("ANALYTICS_API_URL") or "").strip().rstrip("/")
 ANALYTICS_API_KEY = (os.environ.get("ANALYTICS_API_KEY") or "").strip()
+MCP_AUTH_TOKEN = (os.environ.get("MCP_AUTH_TOKEN") or "").strip()
 MCP_SESSION_HEADER = "Mcp-Session-Id"
 
 
 def _bearer_ok(auth: str | None) -> bool:
-    if not ANALYTICS_API_KEY: return False
-    if not auth or not auth.startswith("Bearer "): return False
-    return auth[7:].strip() == ANALYTICS_API_KEY.strip()
+    if not auth or not auth.startswith("Bearer "):
+        return False
+    token = auth[7:].strip()
+    # Accept either ANALYTICS_API_KEY (for analytics API) or MCP_AUTH_TOKEN (for Cursor)
+    if ANALYTICS_API_KEY and token == ANALYTICS_API_KEY:
+        return True
+    if MCP_AUTH_TOKEN and token == MCP_AUTH_TOKEN:
+        return True
+    return False
 
 
 def _api_get(path: str, params: dict | None = None) -> dict:
