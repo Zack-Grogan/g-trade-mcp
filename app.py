@@ -1,16 +1,19 @@
 """
 g-trade-mcp: G-Trade MCP server backed by analytics API (same tool/resource names as local).
 Auth: Bearer ANALYTICS_API_KEY or MCP_AUTH_TOKEN.
+Transport: streamable-http with SSE support.
 """
 from __future__ import annotations
 
 import json
 import os
 import logging
-from typing import Any
+from typing import Any, AsyncGenerator
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
+from starlette.responses import Response
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +27,6 @@ def _bearer_ok(auth: str | None) -> bool:
     if not auth or not auth.startswith("Bearer "):
         return False
     token = auth[7:].strip()
-    # Accept either ANALYTICS_API_KEY (for analytics API) or MCP_AUTH_TOKEN (for Cursor)
     if ANALYTICS_API_KEY and token == ANALYTICS_API_KEY:
         return True
     if MCP_AUTH_TOKEN and token == MCP_AUTH_TOKEN:
@@ -65,7 +67,6 @@ def _call_tool(name: str, arguments: dict) -> Any:
             return {"events": r.get("events", [])}
         return {"events": []}
     if name == "get_performance_summary":
-        run_id = arguments.get("run_id")
         r = _api_get("/analytics/summary")
         return r or {}
     if name == "get_runtime_summary":
@@ -82,6 +83,43 @@ def _call_tool(name: str, arguments: dict) -> Any:
     return {"error": f"Unknown tool: {name}"}
 
 
+def _handle_jsonrpc(body: dict) -> dict:
+    method = body.get("method")
+    params = body.get("params") or {}
+    req_id = body.get("id")
+
+    if method == "initialize":
+        return _jsonrpc_result(req_id, {
+            "protocolVersion": "2024-11-05",
+            "serverInfo": {"name": "es-hotzone-trader-mcp", "version": "0.1.0"},
+            "capabilities": {"tools": {}, "resources": {}},
+        })
+    if method == "ping":
+        return _jsonrpc_result(req_id, {})
+    if method == "tools/list":
+        return _jsonrpc_result(req_id, {"tools": [
+            {"name": "list_runs", "description": "List recent runs.", "inputSchema": {"type": "object"}},
+            {"name": "query_events", "description": "Query events.", "inputSchema": {"type": "object"}},
+            {"name": "get_performance_summary", "description": "Performance summary.", "inputSchema": {"type": "object"}},
+            {"name": "get_runtime_summary", "description": "Runtime summary.", "inputSchema": {"type": "object"}},
+            {"name": "get_run_context", "description": "Run context.", "inputSchema": {"type": "object"}},
+        ]})
+    if method == "tools/call":
+        name = params.get("name")
+        args = params.get("arguments") or {}
+        result = _call_tool(name, args)
+        return _jsonrpc_result(req_id, {
+            "content": [{"type": "text", "text": json.dumps(result, indent=2, default=str)}],
+            "structuredContent": result,
+            "isError": False,
+        })
+    if method == "resources/list":
+        return _jsonrpc_result(req_id, {"resources": []})
+    if method == "resources/read":
+        return _jsonrpc_result(req_id, {"contents": []})
+    return _jsonrpc_error(req_id, -32601, f"Unsupported method: {method}")
+
+
 app = FastAPI(title="g-trade-mcp")
 
 
@@ -90,55 +128,61 @@ async def mcp_post(request: Request, authorization: str | None = Header(None)):
     if not _bearer_ok(authorization):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
     body = await request.json()
-    method = body.get("method")
-    params = body.get("params") or {}
-    req_id = body.get("id")
     try:
-        if method == "initialize":
-            return _jsonrpc_result(req_id, {
-                "protocolVersion": "2024-11-05",
-                "serverInfo": {"name": "es-hotzone-trader-mcp", "version": "0.1.0"},
-                "capabilities": {"tools": {}, "resources": {}},
-            })
-        if method == "ping":
-            return _jsonrpc_result(req_id, {})
-        if method == "tools/list":
-            return _jsonrpc_result(req_id, {"tools": [
-                {"name": "list_runs", "description": "List recent runs.", "inputSchema": {"type": "object"}},
-                {"name": "query_events", "description": "Query events.", "inputSchema": {"type": "object"}},
-                {"name": "get_performance_summary", "description": "Performance summary.", "inputSchema": {"type": "object"}},
-                {"name": "get_runtime_summary", "description": "Runtime summary.", "inputSchema": {"type": "object"}},
-                {"name": "get_run_context", "description": "Run context.", "inputSchema": {"type": "object"}},
-            ]})
-        if method == "tools/call":
-            name = params.get("name")
-            args = params.get("arguments") or {}
-            result = _call_tool(name, args)
-            return _jsonrpc_result(req_id, {
-                "content": [{"type": "text", "text": json.dumps(result, indent=2, default=str)}],
-                "structuredContent": result,
-                "isError": False,
-            })
-        if method == "resources/list":
-            return _jsonrpc_result(req_id, {"resources": []})
-        if method == "resources/read":
-            return _jsonrpc_result(req_id, {"contents": []})
-        return _jsonrpc_error(req_id, -32601, f"Unsupported method: {method}")
+        return _handle_jsonrpc(body)
     except Exception as e:
         logger.exception("MCP request failed")
-        return _jsonrpc_error(req_id, -32000, str(e))
+        return _jsonrpc_error(body.get("id"), -32000, str(e))
 
 
 @app.get("/mcp")
-async def mcp_metadata(authorization: str | None = Header(None)):
+async def mcp_get(request: Request, authorization: str | None = Header(None)):
+    """SSE endpoint for streamable HTTP transport."""
     if not _bearer_ok(authorization):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
-    return {
-        "name": "es-hotzone-trader-mcp",
-        "transport": "streamable-http",
-        "endpoint": "/mcp",
-        "session_header": MCP_SESSION_HEADER,
-    }
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        # Send endpoint event for discovery
+        yield f"event: endpoint\ndata: /mcp\n\n"
+        # Keep connection alive with periodic pings
+        import asyncio
+        while True:
+            await asyncio.sleep(30)
+            yield f"event: ping\ndata: {{}}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@app.get("/sse")
+async def sse_endpoint(request: Request, authorization: str | None = Header(None)):
+    """Legacy SSE endpoint fallback for older clients."""
+    if not _bearer_ok(authorization):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        yield f"event: endpoint\ndata: /mcp\n\n"
+        import asyncio
+        while True:
+            await asyncio.sleep(30)
+            yield f"event: ping\ndata: {{}}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 @app.get("/health")
