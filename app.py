@@ -1,7 +1,7 @@
 """
 g-trade-mcp: G-Trade MCP server backed by analytics API (same tool/resource names as local).
 Auth: Bearer ANALYTICS_API_KEY or MCP_AUTH_TOKEN.
-Transport: streamable-http (2025-03-26) with SSE support; returns Mcp-Session-Id and 202 for notifications.
+Transport: streamable-http with SSE support; returns Mcp-Session-Id and 202 for notifications.
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ ANALYTICS_API_URL = (os.environ.get("ANALYTICS_API_URL") or "").strip().rstrip("
 ANALYTICS_API_KEY = (os.environ.get("ANALYTICS_API_KEY") or "").strip()
 MCP_AUTH_TOKEN = (os.environ.get("MCP_AUTH_TOKEN") or "").strip()
 MCP_SESSION_HEADER = "Mcp-Session-Id"
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-03-26", "2024-11-05")
 
 
 def _bearer_ok(auth: str | None) -> bool:
@@ -61,6 +62,13 @@ def _jsonrpc_error(req_id: Any, code: int, message: str) -> dict:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
+def _negotiate_protocol_version(requested_version: Any) -> str:
+    version = str(requested_version or "").strip()
+    if version in SUPPORTED_PROTOCOL_VERSIONS:
+        return version
+    return SUPPORTED_PROTOCOL_VERSIONS[0]
+
+
 async def _call_tool(name: str, arguments: dict) -> Any:
     if name == "list_runs":
         r = await _api_get("/runs", {"limit": arguments.get("limit", 25), "search": arguments.get("search")})
@@ -89,12 +97,67 @@ async def _call_tool(name: str, arguments: dict) -> Any:
             return {"error": "run_id required"}
         r = await _api_get(f"/runs/{run_id}/state_snapshots", {"limit": arguments.get("limit", 100)})
         return {"stateSnapshots": r.get("stateSnapshots", [])}
+    if name == "get_market_tape":
+        run_id = arguments.get("run_id")
+        if not run_id:
+            return {"error": "run_id required"}
+        r = await _api_get(f"/runs/{run_id}/market_tape", {"limit": arguments.get("limit", 500)})
+        return {"marketTape": r.get("marketTape", [])}
+    if name == "get_decision_snapshots":
+        run_id = arguments.get("run_id")
+        if not run_id:
+            return {"error": "run_id required"}
+        r = await _api_get(f"/runs/{run_id}/decision_snapshots", {"limit": arguments.get("limit", 200)})
+        return {"decisionSnapshots": r.get("decisionSnapshots", [])}
+    if name == "get_order_lifecycle":
+        run_id = arguments.get("run_id")
+        if not run_id:
+            return {"error": "run_id required"}
+        r = await _api_get(f"/runs/{run_id}/order_lifecycle", {"limit": arguments.get("limit", 500)})
+        return {"orderLifecycle": r.get("orderLifecycle", [])}
+    if name == "get_bridge_health":
+        run_id = arguments.get("run_id")
+        if not run_id:
+            return {"error": "run_id required"}
+        r = await _api_get(f"/runs/{run_id}/bridge_health", {"limit": arguments.get("limit", 100)})
+        return {"bridgeHealth": r.get("bridgeHealth", [])}
+    if name == "get_run_manifest":
+        run_id = arguments.get("run_id")
+        if not run_id:
+            return {"error": "run_id required"}
+        r = await _api_get(f"/runs/{run_id}/manifest")
+        return r or {}
     if name == "get_event_timeline":
         run_id = arguments.get("run_id")
         if not run_id:
             return {"error": "run_id required"}
         r = await _api_get(f"/runs/{run_id}/timeline", {"limit": arguments.get("limit", 400)})
         return r or {}
+    if name == "get_non_entry_explanations":
+        run_id = arguments.get("run_id")
+        if not run_id:
+            return {"error": "run_id required"}
+        r = await _api_get(f"/runs/{run_id}/non_entry_explanations", {"limit": arguments.get("limit", 200)})
+        return r or {}
+    if name == "compare_runs":
+        left_run_id = arguments.get("left_run_id")
+        right_run_id = arguments.get("right_run_id")
+        if not left_run_id or not right_run_id:
+            return {"error": "left_run_id and right_run_id required"}
+        r = await _api_get("/runs/compare", {"left_run_id": left_run_id, "right_run_id": right_run_id})
+        return r or {}
+    if name == "search_runs":
+        q = arguments.get("q")
+        if not q:
+            return {"error": "q required"}
+        r = await _api_get("/search/runs", {"q": q, "limit": arguments.get("limit", 25)})
+        return {"runs": r.get("runs", [])}
+    if name == "search_events":
+        q = arguments.get("q")
+        if not q:
+            return {"error": "q required"}
+        r = await _api_get("/search/events", {"q": q, "limit": arguments.get("limit", 100)})
+        return {"events": r.get("events", [])}
     if name == "get_order_event_story":
         run_id = arguments.get("run_id")
         order_id = arguments.get("order_id")
@@ -123,14 +186,26 @@ async def _call_tool(name: str, arguments: dict) -> Any:
         events = await _api_get(f"/runs/{run_id}/events", {"limit": arguments.get("event_limit", 50)})
         trades = await _api_get(f"/runs/{run_id}/trades", {"limit": arguments.get("trade_limit", 50)})
         snapshots = await _api_get(f"/runs/{run_id}/state_snapshots", {"limit": arguments.get("snapshot_limit", 25)})
+        market_tape = await _api_get(f"/runs/{run_id}/market_tape", {"limit": arguments.get("market_limit", 50)})
+        decisions = await _api_get(f"/runs/{run_id}/decision_snapshots", {"limit": arguments.get("decision_limit", 25)})
+        lifecycle = await _api_get(f"/runs/{run_id}/order_lifecycle", {"limit": arguments.get("order_limit", 50)})
+        bridge_health = await _api_get(f"/runs/{run_id}/bridge_health", {"limit": arguments.get("bridge_limit", 25)})
+        manifest = await _api_get(f"/runs/{run_id}/manifest")
         timeline = await _api_get(f"/runs/{run_id}/timeline", {"limit": arguments.get("timeline_limit", 200)})
+        explanations = await _api_get(f"/runs/{run_id}/non_entry_explanations", {"limit": arguments.get("explanation_limit", 100)})
         return {
             "run": run,
             "events": events.get("events", []),
             "trades": trades.get("trades", []),
             "state_snapshots": snapshots.get("stateSnapshots", []),
+            "market_tape": market_tape.get("marketTape", []),
+            "decision_snapshots": decisions.get("decisionSnapshots", []),
+            "order_lifecycle": lifecycle.get("orderLifecycle", []),
+            "bridge_health": bridge_health.get("bridgeHealth", []),
+            "manifest": manifest,
             "timeline": timeline.get("timeline", []),
             "blockers": timeline.get("blockers", []),
+            "explanations": explanations.get("explanations", []),
             "counts": timeline.get("counts", {}),
         }
     if name == "summarize_execution_reconstruction":
@@ -138,10 +213,12 @@ async def _call_tool(name: str, arguments: dict) -> Any:
         if not run_id:
             return {"error": "run_id required"}
         timeline = await _api_get(f"/runs/{run_id}/timeline", {"limit": arguments.get("limit", 400)})
+        explanations = await _api_get(f"/runs/{run_id}/non_entry_explanations", {"limit": arguments.get("explanation_limit", 100)})
         return {
             "run_id": run_id,
             "counts": timeline.get("counts", {}),
             "blockers": timeline.get("blockers", []),
+            "explanations": explanations.get("explanations", []),
             "timeline": timeline.get("timeline", []),
         }
     return {"error": f"Unknown tool: {name}"}
@@ -154,30 +231,40 @@ async def _handle_jsonrpc(body: dict) -> tuple[dict | None, int, dict[str, str]]
     req_id = body.get("id")
 
     if method == "initialize":
+        protocol_version = _negotiate_protocol_version(params.get("protocolVersion"))
         session_id = secrets.token_urlsafe(32)
         result = _jsonrpc_result(req_id, {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": protocol_version,
             "serverInfo": {"name": "es-hotzone-trader-mcp", "version": "0.1.0"},
             "capabilities": {"tools": {}, "resources": {}},
         })
         return result, 200, {MCP_SESSION_HEADER: session_id}
     if method == "notifications/initialized":
-        # Codex rmcp currently expects a JSON-RPC-style response here; be lenient.
-        # Echo the id if present so both "request" and "notification" styles work.
-        return _jsonrpc_result(req_id, {}), 200, {}
+        return None, 202, {}
+    if str(method or "").startswith("notifications/"):
+        return None, 202, {}
     if method == "ping":
         return _jsonrpc_result(req_id, {}), 200, {}
     if method == "tools/list":
         return _jsonrpc_result(req_id, {"tools": [
-            {"name": "list_runs", "description": "List recent runs.", "inputSchema": {"type": "object"}},
-            {"name": "query_events", "description": "Query events.", "inputSchema": {"type": "object"}},
-            {"name": "get_state_snapshots", "description": "Fetch state snapshots for a run.", "inputSchema": {"type": "object"}},
-            {"name": "get_event_timeline", "description": "Fetch the reconstructed run timeline.", "inputSchema": {"type": "object"}},
-            {"name": "get_order_event_story", "description": "Fetch all events for a specific order.", "inputSchema": {"type": "object"}},
-            {"name": "get_performance_summary", "description": "Performance summary.", "inputSchema": {"type": "object"}},
-            {"name": "get_runtime_summary", "description": "Runtime summary.", "inputSchema": {"type": "object"}},
-            {"name": "get_run_context", "description": "Run context.", "inputSchema": {"type": "object"}},
-            {"name": "summarize_execution_reconstruction", "description": "Summarize a run reconstruction timeline.", "inputSchema": {"type": "object"}},
+            {"name": "list_runs", "description": "List recent runs.", "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer"}, "search": {"type": "string"}}}},
+            {"name": "query_events", "description": "Query events.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "limit": {"type": "integer"}, "category": {"type": "string"}, "event_type": {"type": "string"}, "order_id": {"type": "string"}, "search": {"type": "string"}, "since_minutes": {"type": "integer"}, "start_time": {"type": "string"}, "end_time": {"type": "string"}}, "required": ["run_id"]}},
+            {"name": "get_state_snapshots", "description": "Fetch state snapshots for a run.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["run_id"]}},
+            {"name": "get_market_tape", "description": "Fetch market tape for a run.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["run_id"]}},
+            {"name": "get_decision_snapshots", "description": "Fetch decision snapshots for a run.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["run_id"]}},
+            {"name": "get_order_lifecycle", "description": "Fetch order lifecycle records for a run.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["run_id"]}},
+            {"name": "get_bridge_health", "description": "Fetch bridge health records for a run.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["run_id"]}},
+            {"name": "get_run_manifest", "description": "Fetch the manifest for a run.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]}},
+            {"name": "get_event_timeline", "description": "Fetch the reconstructed run timeline.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["run_id"]}},
+            {"name": "get_order_event_story", "description": "Fetch all events for a specific order.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "order_id": {"type": "string"}, "limit": {"type": "integer"}, "search": {"type": "string"}}, "required": ["run_id", "order_id"]}},
+            {"name": "get_non_entry_explanations", "description": "Fetch decision snapshots that did not submit an order.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["run_id"]}},
+            {"name": "compare_runs", "description": "Compare two runs by summary metrics.", "inputSchema": {"type": "object", "properties": {"left_run_id": {"type": "string"}, "right_run_id": {"type": "string"}}, "required": ["left_run_id", "right_run_id"]}},
+            {"name": "search_runs", "description": "Search runs by query string.", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["q"]}},
+            {"name": "search_events", "description": "Search events across runs.", "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["q"]}},
+            {"name": "get_performance_summary", "description": "Performance summary.", "inputSchema": {"type": "object", "properties": {}}},
+            {"name": "get_runtime_summary", "description": "Runtime summary.", "inputSchema": {"type": "object", "properties": {}}},
+            {"name": "get_run_context", "description": "Run context.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "event_limit": {"type": "integer"}, "trade_limit": {"type": "integer"}, "snapshot_limit": {"type": "integer"}, "market_limit": {"type": "integer"}, "decision_limit": {"type": "integer"}, "order_limit": {"type": "integer"}, "bridge_limit": {"type": "integer"}, "timeline_limit": {"type": "integer"}, "explanation_limit": {"type": "integer"}}, "required": ["run_id"]}},
+            {"name": "summarize_execution_reconstruction", "description": "Summarize a run reconstruction timeline.", "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "limit": {"type": "integer"}, "explanation_limit": {"type": "integer"}}, "required": ["run_id"]}},
         ]}), 200, {}
     if method == "tools/call":
         name = params.get("name")
@@ -239,7 +326,7 @@ async def root_get(request: Request, authorization: str | None = Header(None)):
     """SSE endpoint for streamable HTTP transport at root."""
     if not _bearer_ok(authorization):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
-    return StreamingResponse(_sse_generator("/"), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return StreamingResponse(_sse_generator(str(request.url)), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 @app.post("/mcp")
@@ -265,7 +352,7 @@ async def mcp_get(request: Request, authorization: str | None = Header(None)):
     """SSE endpoint for streamable HTTP transport."""
     if not _bearer_ok(authorization):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
-    return StreamingResponse(_sse_generator("/mcp"), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return StreamingResponse(_sse_generator(str(request.url)), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 @app.get("/sse")
@@ -273,7 +360,7 @@ async def sse_endpoint(request: Request, authorization: str | None = Header(None
     """Legacy SSE endpoint fallback for older clients."""
     if not _bearer_ok(authorization):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing Bearer token")
-    return StreamingResponse(_sse_generator("/mcp"), media_type="text/event-stream", headers=_SSE_HEADERS)
+    return StreamingResponse(_sse_generator(str(request.url)), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 @app.get("/health")
